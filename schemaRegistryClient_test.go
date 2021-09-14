@@ -77,10 +77,8 @@ func TestSchemaRegistryClient_CreateSchemaWithoutReferences(t *testing.T) {
 
 			switch req.URL.String() {
 			case "/subjects/test1/versions":
-				requestPayload := schemaRequest{
-					Schema:     "test2",
-					SchemaType: Avro.String(),
-					References: []Reference{},
+				requestPayload := schemaRequestCompat{
+					Schema: "test2",
 				}
 				expected, _ := json.Marshal(requestPayload)
 				// Test payload

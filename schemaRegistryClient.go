@@ -93,6 +93,10 @@ type credentials struct {
 	password string
 }
 
+// SchemaRequest object that is compatible with versions of Schema registry that don't support the SchemaType or references Parameters
+type schemaRequestCompat struct {
+	Schema string `json:"schema"`
+}
 type schemaRequest struct {
 	Schema     string      `json:"schema"`
 	SchemaType string      `json:"schemaType"`
@@ -231,6 +235,7 @@ func (client *SchemaRegistryClient) GetSchemaByVersion(subject string, version i
 // all its associated information.
 func (client *SchemaRegistryClient) CreateSchema(subject string, schema string,
 	schemaType SchemaType, references ...Reference) (*Schema, error) {
+	var err error
 	switch schemaType {
 	case Avro, Json:
 		compiledRegex := regexp.MustCompile(`\r?\n`)
@@ -245,8 +250,14 @@ func (client *SchemaRegistryClient) CreateSchema(subject string, schema string,
 		references = make([]Reference, 0)
 	}
 
-	schemaReq := schemaRequest{Schema: schema, SchemaType: schemaType.String(), References: references}
-	schemaBytes, err := json.Marshal(schemaReq)
+	var schemaBytes []byte
+	if schemaType.String() == "AVRO" {
+		schemaReq := schemaRequestCompat{Schema: schema}
+		schemaBytes, err = json.Marshal(schemaReq)
+	} else {
+		schemaReq := schemaRequest{Schema: schema, SchemaType: schemaType.String(), References: references}
+		schemaBytes, err = json.Marshal(schemaReq)
+	}
 	if err != nil {
 		return nil, err
 	}
