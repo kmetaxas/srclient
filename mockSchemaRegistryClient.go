@@ -106,7 +106,9 @@ func (mck MockSchemaRegistryClient) GetLatestSchema(subject string) (*Schema, er
 	if getSchemaVersionErr != nil {
 		return nil, getSchemaVersionErr
 	}
-
+	if len(versions) == 0 {
+		return nil, errors.New("Subject not found")
+	}
 	latestVersion := versions[len(versions)-1]
 	thisSchema, err := mck.GetSchemaByVersion(subject, latestVersion)
 	if err != nil {
@@ -161,10 +163,27 @@ func (mck MockSchemaRegistryClient) GetSubjects() ([]string, error) {
 	return allSubjects, nil
 }
 
+// GetSubjectsIncludingDeleted returns all registered subjects including those which have been soft deleted
+func (mck MockSchemaRegistryClient) GetSubjectsIncludingDeleted() ([]string, error) {
+	return nil, errors.New("mock schema registry client can't return soft deleted subjects")
+}
+
 // DeleteSubject removes given subject from cache
 func (mck MockSchemaRegistryClient) DeleteSubject(subject string, _ bool) error {
 	delete(mck.schemaCache, subject)
 	return nil
+}
+
+func (mck MockSchemaRegistryClient) ChangeSubjectCompatibilityLevel(subject string, compatibility CompatibilityLevel) (*CompatibilityLevel, error) {
+	return nil, errors.New("mock schema registry client can't change subject compatibility level")
+}
+
+func (mck MockSchemaRegistryClient) GetGlobalCompatibilityLevel() (*CompatibilityLevel, error) {
+	return nil, errors.New("mock schema registry client can't return global compatibility level")
+}
+
+func (mck MockSchemaRegistryClient) GetCompatibilityLevel(subject string, defaultToGlobal bool) (*CompatibilityLevel, error) {
+	return nil, errors.New("mock schema registry client can't return compatibility level")
 }
 
 /*
@@ -182,12 +201,20 @@ func (mck MockSchemaRegistryClient) CachingEnabled(value bool) {
 	// Nothing because caching is always enabled, duh
 }
 
+func (mck MockSchemaRegistryClient) ResetCache() {
+	// Nothing because there is no lock for cache
+}
+
 func (mck MockSchemaRegistryClient) CodecCreationEnabled(value bool) {
 	// Nothing because codecs do not matter in the inMem storage of schemas
 }
 
 func (mck MockSchemaRegistryClient) IsSchemaCompatible(subject, schema, version string, schemaType SchemaType) (bool, error) {
 	return false, errors.New("mock schema registry client can't check for schema compatibility")
+}
+
+func (mck MockSchemaRegistryClient) LookupSchema(subject string, schema string, schemaType SchemaType, references ...Reference) (*Schema, error) {
+	return nil, errors.New("mock schema registry client can't lookup schema")
 }
 
 /*
