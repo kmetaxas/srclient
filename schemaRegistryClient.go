@@ -395,14 +395,8 @@ func (client *SchemaRegistryClient) CreateSchema(subject string, schema string,
 	if err != nil {
 		return nil, err
 	}
-	// Conceptually, the schema returned below will be the
-	// exactly same one created above. However, since Schema
-	// Registry can have multiple concurrent clients writing
-	// schemas, this may produce an incorrect result. Thus,
-	// this logic strongly relies on the idempotent guarantees
-	// from Schema Registry, as well as in the best practice
-	// that schemas don't change very often.
-	newSchema, err := client.GetLatestSchema(subject)
+
+	newSchema, err := client.GetSchema(schemaResp.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -754,7 +748,7 @@ func (e Error) Error() string {
 }
 
 func createError(resp *http.Response) error {
-	err := Error{str: bytes.NewBuffer(make([]byte, 0, resp.ContentLength))}
+	err := Error{str: bytes.NewBuffer(make([]byte, 0))}
 	decoder := json.NewDecoder(io.TeeReader(resp.Body, err.str))
 	marshalErr := decoder.Decode(&err)
 	if marshalErr != nil {
