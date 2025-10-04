@@ -1,7 +1,6 @@
 package srclient
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,12 +16,65 @@ import (
 )
 
 func bodyToString(in io.ReadCloser) string {
-	buf := new(bytes.Buffer)
-	buf.ReadFrom(in)
-	return buf.String()
+	result, _ := io.ReadAll(in)
+	return string(result)
+}
+
+func TestNewSchemaRegistryClient_SetsExpectedOptions(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		registryUrl string
+		options     []Option
+
+		expectedClient          *http.Client
+		expectedSemaphoreWeight int64
+	}{
+		"no options": {
+			registryUrl: "localhost:8080",
+
+			expectedClient:          &http.Client{Timeout: defaultTimeout},
+			expectedSemaphoreWeight: defaultSemaphoreWeight,
+		},
+		"custom semaphore weight": {
+			registryUrl: "local:8080",
+			options:     []Option{WithSemaphoreWeight(32)},
+
+			expectedClient:          &http.Client{Timeout: defaultTimeout},
+			expectedSemaphoreWeight: 32,
+		},
+		"custom client": {
+			registryUrl: "172.0.0.1:8080",
+			options:     []Option{WithClient(&http.Client{Timeout: 32})},
+
+			expectedClient:          &http.Client{Timeout: 32},
+			expectedSemaphoreWeight: defaultSemaphoreWeight,
+		},
+	}
+
+	for name, testData := range tests {
+		testData := testData
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			// Act
+			result := NewSchemaRegistryClient(testData.registryUrl, testData.options...)
+
+			// Assert
+			assert.Equal(t, testData.registryUrl, result.schemaRegistryURL)
+			assert.Equal(t, testData.expectedClient, result.httpClient)
+
+			// We should be able to acquire the semaphore by the size we specified
+			assert.True(t, result.sem.TryAcquire(testData.expectedSemaphoreWeight))
+			result.sem.Release(testData.expectedSemaphoreWeight)
+
+			// Anthing bigger than that weight should fail
+			assert.False(t, result.sem.TryAcquire(testData.expectedSemaphoreWeight+1))
+		})
+	}
 }
 
 func TestSchemaRegistryClient_CreateSchemaWithoutReferences(t *testing.T) {
+	t.Parallel()
 
 	{
 		server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
@@ -46,7 +98,7 @@ func TestSchemaRegistryClient_CreateSchemaWithoutReferences(t *testing.T) {
 				assert.Equal(t, bodyToString(req.Body), string(expected))
 				// Send response to be tested
 				rw.Write(response)
-			case "/subjects/test1-value/versions/latest":
+			case fmt.Sprintf("/schemas/ids/%d", responsePayload.Version):
 				// Send response to be tested
 				rw.Write(response)
 			default:
@@ -87,7 +139,7 @@ func TestSchemaRegistryClient_CreateSchemaWithoutReferences(t *testing.T) {
 				assert.Equal(t, bodyToString(req.Body), string(expected))
 				// Send response to be tested
 				rw.Write(response)
-			case "/subjects/test1/versions/latest":
+			case fmt.Sprintf("/schemas/ids/%d", responsePayload.Version):
 				// Send response to be tested
 				rw.Write(response)
 			default:
@@ -153,6 +205,7 @@ func TestSchemaRegistryClient_CreateSchemaWithoutReferences(t *testing.T) {
 }
 
 func TestSchemaRegistryClient_LookupSchemaWithoutReferences(t *testing.T) {
+	t.Parallel()
 	var errorCode int
 	var errorMessage string
 	{
@@ -324,7 +377,75 @@ func TestSchemaRegistryClient_LookupSchemaWithoutReferences(t *testing.T) {
 	}
 }
 
+func TestSchemaRegistryClient_GetSchemaByIDWithReferences(t *testing.T) {
+	t.Parallel()
+	{
+		refs := []Reference{
+			{Name: "name1", Subject: "subject1", Version: 1},
+			{Name: "name2", Subject: "subject2", Version: 2},
+		}
+
+		server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+			responsePayload := schemaResponse{
+				Subject:    "test1",
+				Version:    1,
+				Schema:     "payload",
+				ID:         1,
+				References: refs,
+			}
+			response, _ := json.Marshal(responsePayload)
+
+			switch req.URL.String() {
+			case "/schemas/ids/1":
+				// Send response to be tested
+				rw.Write(response)
+			default:
+				require.Fail(t, "unhandled request")
+			}
+
+		}))
+
+		srClient := CreateSchemaRegistryClient(server.URL)
+		srClient.CodecCreationEnabled(false)
+		schema, err := srClient.GetSchema(1)
+
+		// Test response
+		assert.NoError(t, err)
+		assert.Equal(t, schema.ID(), 1)
+		assert.Nil(t, schema.codec)
+		assert.Equal(t, schema.Schema(), "payload")
+		assert.Equal(t, schema.Version(), 1)
+		assert.Equal(t, schema.References(), refs)
+		assert.Equal(t, len(schema.References()), 2)
+	}
+	{
+		server, call := mockServerFromIDWithSchemaResponse(t, 1, schemaResponse{
+			Subject:    "test1",
+			Version:    1,
+			Schema:     "payload",
+			ID:         1,
+			References: nil,
+		})
+
+		srClient := CreateSchemaRegistryClient(server.URL)
+		srClient.CodecCreationEnabled(false)
+		schema, err := srClient.GetSchema(1)
+
+		// Test response
+		assert.NoError(t, err)
+
+		assert.Equal(t, 1, *call)
+		assert.Equal(t, schema.ID(), 1)
+		assert.Nil(t, schema.codec)
+		assert.Equal(t, schema.Schema(), "payload")
+		assert.Equal(t, schema.Version(), 1)
+		assert.Nil(t, schema.References())
+		assert.Equal(t, len(schema.References()), 0)
+	}
+}
+
 func TestSchemaRegistryClient_GetSchemaByVersionWithReferences(t *testing.T) {
+	t.Parallel()
 	{
 		refs := []Reference{
 			{Name: "name1", Subject: "subject1", Version: 1},
@@ -365,7 +486,7 @@ func TestSchemaRegistryClient_GetSchemaByVersionWithReferences(t *testing.T) {
 		assert.Equal(t, len(schema.References()), 2)
 	}
 	{
-		server, call := mockServerWithSchemaResponse(t, "test1", "1", schemaResponse{
+		server, call := mockServerFromSubjectVersionPairWithSchemaResponse(t, "test1", "1", schemaResponse{
 			Subject:    "test1",
 			Version:    1,
 			Schema:     "payload",
@@ -391,8 +512,9 @@ func TestSchemaRegistryClient_GetSchemaByVersionWithReferences(t *testing.T) {
 }
 
 func TestSchemaRegistryClient_GetSchemaByVersionReturnsValueFromCache(t *testing.T) {
+	t.Parallel()
 	{
-		server, call := mockServerWithSchemaResponse(t, "test1", "1", schemaResponse{
+		server, call := mockServerFromSubjectVersionPairWithSchemaResponse(t, "test1", "1", schemaResponse{
 			Subject:    "test1",
 			Version:    1,
 			Schema:     "payload",
@@ -416,7 +538,8 @@ func TestSchemaRegistryClient_GetSchemaByVersionReturnsValueFromCache(t *testing
 }
 
 func TestSchemaRegistryClient_GetLatestSchemaReturnsValueFromCache(t *testing.T) {
-	server, call := mockServerWithSchemaResponse(t, "test1-value", "latest", schemaResponse{
+	t.Parallel()
+	server, call := mockServerFromSubjectVersionPairWithSchemaResponse(t, "test1-value", "latest", schemaResponse{
 		Subject:    "test1",
 		Version:    1,
 		Schema:     "payload",
@@ -439,9 +562,10 @@ func TestSchemaRegistryClient_GetLatestSchemaReturnsValueFromCache(t *testing.T)
 }
 
 func TestSchemaRegistryClient_GetSchemaType(t *testing.T) {
+	t.Parallel()
 	{
 		expectedSchemaType := Json
-		server, call := mockServerWithSchemaResponse(t, "test1-value", "latest", schemaResponse{
+		server, call := mockServerFromSubjectVersionPairWithSchemaResponse(t, "test1-value", "latest", schemaResponse{
 			Subject:    "test1",
 			Version:    1,
 			Schema:     "payload",
@@ -459,7 +583,7 @@ func TestSchemaRegistryClient_GetSchemaType(t *testing.T) {
 		assert.Equal(t, *schema.SchemaType(), expectedSchemaType)
 	}
 	{
-		server, call := mockServerWithSchemaResponse(t, "test1-value", "latest", schemaResponse{
+		server, call := mockServerFromSubjectVersionPairWithSchemaResponse(t, "test1-value", "latest", schemaResponse{
 			Subject:    "test1",
 			Version:    1,
 			Schema:     "payload",
@@ -477,9 +601,55 @@ func TestSchemaRegistryClient_GetSchemaType(t *testing.T) {
 	}
 }
 
-func TestSchemaRegistryClient_JsonSchemaParses(t *testing.T) {
+func TestSchemaRegistryClient_GetSubjectVersionsById(t *testing.T) {
+	t.Parallel()
 	{
-		server, call := mockServerWithSchemaResponse(t, "test1-value", "latest", schemaResponse{
+		server, call := mockServerWithSubjectVersionResponse(t, fmt.Sprintf("/schemas/ids/%d/versions", 1), SubjectVersionResponse{
+			subjectVersionPair{
+				Subject: "test1",
+				Version: 1,
+			},
+			subjectVersionPair{
+				Subject: "test1",
+				Version: 2,
+			},
+		})
+
+		srClient := CreateSchemaRegistryClient(server.URL)
+		response, err := srClient.GetSubjectVersionsById(1)
+
+		// Test response
+		assert.NoError(t, err)
+		assert.Equal(t, 1, *call)
+		assert.Len(t, response, 2)
+		assert.Equal(t, response[0].Subject, "test1")
+		assert.Equal(t, response[0].Version, 1)
+		assert.Equal(t, response[1].Subject, "test1")
+		assert.Equal(t, response[1].Version, 2)
+	}
+}
+
+func TestSchemaRegistryClient_GetSchemaRegistryURL(t *testing.T) {
+	t.Parallel()
+	server, _ := mockServerFromSubjectVersionPairWithSchemaResponse(t, "test1-value", "latest", schemaResponse{
+		Subject:    "test1",
+		Version:    1,
+		Schema:     "payload",
+		ID:         1,
+		References: nil,
+	})
+
+	srClient := CreateSchemaRegistryClient(server.URL)
+	// when
+	actual := srClient.GetSchemaRegistryURL()
+	// then
+	assert.Equal(t, actual, server.URL)
+}
+
+func TestSchemaRegistryClient_JsonSchemaParses(t *testing.T) {
+	t.Parallel()
+	{
+		server, call := mockServerFromSubjectVersionPairWithSchemaResponse(t, "test1-value", "latest", schemaResponse{
 			Subject:    "test1",
 			Version:    1,
 			Schema:     "{\"type\": \"object\",\n\"properties\": {\n  \"f1\": {\n    \"type\": \"string\"\n  }}}",
@@ -499,7 +669,7 @@ func TestSchemaRegistryClient_JsonSchemaParses(t *testing.T) {
 		assert.NoError(t, schema1.JsonSchema().Validate(v))
 	}
 	{
-		server, call := mockServerWithSchemaResponse(t, "test1-value", "latest", schemaResponse{
+		server, call := mockServerFromSubjectVersionPairWithSchemaResponse(t, "test1-value", "latest", schemaResponse{
 			Subject:    "test1",
 			Version:    1,
 			Schema:     "payload",
@@ -518,6 +688,7 @@ func TestSchemaRegistryClient_JsonSchemaParses(t *testing.T) {
 }
 
 func TestNewSchema(t *testing.T) {
+	t.Parallel()
 	const (
 		anId        = 3
 		aSchema     = "payload"
@@ -578,14 +749,118 @@ func TestNewSchema(t *testing.T) {
 	}
 }
 
-func mockServerWithSchemaResponse(t *testing.T, subject string, version string, schemaResponse schemaResponse) (*httptest.Server, *int) {
+func TestSchemaRequestMarshal(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		schema     string
+		schemaType SchemaType
+		references []Reference
+		expected   string
+	}{
+		"avro": {
+			schema:     `test2`,
+			schemaType: Avro,
+			expected:   `{"schema":"test2"}`,
+		},
+		"protobuf": {
+			schema:     `test2`,
+			schemaType: Protobuf,
+			expected:   `{"schema":"test2","schemaType":"PROTOBUF"}`,
+		},
+		"json": {
+			schema:     `test2`,
+			schemaType: Json,
+			expected:   `{"schema":"test2","schemaType":"JSON"}`,
+		},
+		"avro-empty-ref": {
+			schema:     `test2`,
+			schemaType: Avro,
+			references: make([]Reference, 0),
+			expected:   `{"schema":"test2"}`,
+		},
+		"protobuf-empty-ref": {
+			schema:     `test2`,
+			schemaType: Protobuf,
+			references: make([]Reference, 0),
+			expected:   `{"schema":"test2","schemaType":"PROTOBUF"}`,
+		},
+		"json-empty-ref": {
+			schema:     `test2`,
+			schemaType: Json,
+			references: make([]Reference, 0),
+			expected:   `{"schema":"test2","schemaType":"JSON"}`,
+		},
+		"avro-ref": {
+			schema:     `test2`,
+			schemaType: Avro,
+			references: []Reference{{Name: "name1", Subject: "subject1", Version: 1}},
+			expected:   `{"schema":"test2","references":[{"name":"name1","subject":"subject1","version":1}]}`,
+		},
+		"protobuf-ref": {
+			schema:     `test2`,
+			schemaType: Protobuf,
+			references: []Reference{{Name: "name1", Subject: "subject1", Version: 1}},
+			expected:   `{"schema":"test2","schemaType":"PROTOBUF","references":[{"name":"name1","subject":"subject1","version":1}]}`,
+		},
+		"json-ref": {
+			schema:     `test2`,
+			schemaType: Json,
+			references: []Reference{{Name: "name1", Subject: "subject1", Version: 1}},
+			expected:   `{"schema":"test2","schemaType":"JSON","references":[{"name":"name1","subject":"subject1","version":1}]}`,
+		},
+	}
+
+	for name, testData := range tests {
+		testData := testData
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			schemaReq := schemaRequest{
+				Schema:     testData.schema,
+				SchemaType: testData.schemaType.String(),
+				References: testData.references,
+			}
+			actual, err := json.Marshal(schemaReq)
+			assert.NoError(t, err)
+			assert.Equal(t, testData.expected, string(actual))
+		})
+	}
+}
+
+func mockServerFromSubjectVersionPairWithSchemaResponse(t *testing.T, subject, version string, schemaResponse schemaResponse) (*httptest.Server, *int) {
+	return mockServerWithSchemaResponse(t, fmt.Sprintf("/subjects/%s/versions/%s", subject, version), schemaResponse)
+}
+
+func mockServerFromIDWithSchemaResponse(t *testing.T, id int, schemaResponse schemaResponse) (*httptest.Server, *int) {
+	return mockServerWithSchemaResponse(t, fmt.Sprintf("/schemas/ids/%d", id), schemaResponse)
+}
+
+func mockServerWithSchemaResponse(t *testing.T, url string, schemaResponse schemaResponse) (*httptest.Server, *int) {
 	var count int
 	return httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		count++
 		response, _ := json.Marshal(schemaResponse)
 
 		switch req.URL.String() {
-		case fmt.Sprintf("/subjects/%s/versions/%s", subject, version):
+		case url:
+			// Send response to be tested
+			_, err := rw.Write(response)
+			if err != nil {
+				t.Errorf("could not write response %s", err)
+			}
+		default:
+			require.Fail(t, "unhandled request")
+		}
+	})), &count
+}
+
+func mockServerWithSubjectVersionResponse(t *testing.T, url string, subjectVersionResponse SubjectVersionResponse) (*httptest.Server, *int) {
+	var count int
+	return httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		count++
+		response, _ := json.Marshal(subjectVersionResponse)
+
+		switch req.URL.String() {
+		case url:
 			// Send response to be tested
 			_, err := rw.Write(response)
 			if err != nil {
